@@ -1,0 +1,117 @@
+name: Adapter CI/CD Pipeline
+
+on:
+  pull_request:
+    branches:
+      - 'collaborate/adapter/**'
+  push:
+    branches:
+      - 'collaborate/adapter/**'
+
+jobs:
+  validate:
+    name: Validar y testear adaptador
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Validar estructura del adaptador
+        run: node scripts/validate-adapter.js ${{ github.ref_name }}
+
+      - name: Lint + formato
+        run: |
+          npm run lint
+          npm run format:check
+
+      - name: Ejecutar tests unitarios
+        run: npm run test
+
+      - name: Auditoría de seguridad
+        run: npm audit --audit-level=high
+
+  semantic-release:
+    name: Versionado automático
+    needs: validate
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npx semantic-release
+
+  sync-to-bitbucket:
+    name: Sincronizar con Bitbucket
+    needs: semantic-release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Obtener nombre del adaptador
+        id: extract
+        run: |
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          ADAPTER_NAME=${BRANCH_NAME#collaborate/adapter/}
+          echo "adapter_name=$ADAPTER_NAME" >> $GITHUB_OUTPUT
+
+      - name: Configurar Git para Bitbucket
+        run: |
+          git config --global user.email "ci-bot@company.com"
+          git config --global user.name "CI Bot"
+
+      - name: Subir a Bitbucket como PR
+        run: |
+          ADAPTER_NAME=${{ steps.extract.outputs.adapter_name }}
+          BITBUCKET_URL="https://x-token-auth:${{ secrets.BITBUCKET_ACCESS_TOKEN }}@bitbucket.org/ctb-marisca/ms3-package-testpipeline.git"
+
+          git remote add bitbucket $BITBUCKET_URL
+          git push bitbucket HEAD:refs/heads/github/${ADAPTER_NAME}-$(date +%Y%m%d%H%M%S)
+
+          echo "Creado PR automático a Bitbucket para revisión interna"
+      - name: Create Pull Request in Bitbucket
+        env:
+          BB_USER: ${{ secrets.BITBUCKET_USERNAME }}
+          BB_PASS: ${{ secrets.BITBUCKET_APP_PASSWORD }}
+        run: |
+          BRANCH_NAME="github/${{ steps.extract.outputs.adapter_name }}"
+          PR_TITLE="Auto PR: Sync ${BRANCH_NAME} from GitHub"
+          PR_DESCRIPTION="This PR syncs community changes from GitHub to Bitbucket for adapter: ${{ steps.extract.outputs.adapter_name }}"
+
+          curl -X POST -u "$BB_USER:$BB_PASS" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "title": "'"$PR_TITLE"'",
+              "source": {
+                "branch": {
+                  "name": "'"$BRANCH_NAME"'"
+                }
+              },
+              "destination": {
+                "branch": {
+                  "name": "main"
+                }
+              },
+              "description": "'"$PR_DESCRIPTION"'",
+              "reviewers": []
+            }' \
+            https://api.bitbucket.org/2.0/repositories/ctb-marisca/ms3-package-testpipeline/pullrequests
