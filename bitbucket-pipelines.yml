@@ -1,7 +1,5 @@
 name: Adapter CI/CD Pipeline
 
-description: 
-
 on:
   pull_request:
     branches:
